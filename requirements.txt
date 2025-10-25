@@ -1,2 +1,9 @@
 docker
+requests
+# Use python-magic-bin on Windows, python-magic elsewhere
+python-magic-bin; platform_system == "Windows"
+python-magic; platform_system != "Windows"
+yara-python
+pefile
+python-dotenv
 
