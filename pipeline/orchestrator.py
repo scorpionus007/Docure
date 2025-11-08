@@ -13,6 +13,7 @@ from .static_analysis import (
 from .decomp import decompile_with_ghidra
 from .ai import analyze_with_deepseek
 from .report import generate_ai_report
+from .virustotal import query_virustotal_for_items
 
 
 def _load_manifest(manifest_path: str) -> Dict:
@@ -78,7 +79,10 @@ def analyze_image(
         write_static_artifact(os.path.join(static_dir, meta["sha256"] + ".json"), item)
         static_items.append(item)
 
-    # 3) Ghidra decomp
+    # 3) VirusTotal by hash (optional via VT_API_KEY)
+    vt_results = query_virustotal_for_items(static_items, out_dir)
+
+    # 4) Ghidra decomp
     decomp_dir = os.path.join(out_dir, "decomp")
     abs_files = [it["abs_path"] for it in static_items]
     decomp_map = decompile_with_ghidra(abs_files, decomp_dir, ghidra_home=ghidra_home, timeout_s=ghidra_timeout_s, verbose=verbose)
@@ -87,7 +91,7 @@ def analyze_image(
         with open(os.path.join(debug_dir, "decomp_map.json"), "w", encoding="utf-8") as f:
             json.dump(decomp_map, f, indent=2, ensure_ascii=False)
 
-    # 4) Suspicion scoring integrating imports/strings from decomp
+    # 5) Suspicion scoring integrating imports/strings from decomp
     flagged_for_ai: List[Dict] = []
     for it in static_items:
         abs_path = it["abs_path"]
@@ -123,7 +127,7 @@ def analyze_image(
                 "pseudocode": pseudocode_snippets[:5],
             })
 
-    # 5) DeepSeek
+    # 6) DeepSeek
     ai_results: List[Dict] = []
     if use_deepseek and flagged_for_ai:
         ai_results = analyze_with_deepseek(flagged_for_ai)
@@ -134,17 +138,18 @@ def analyze_image(
             with open(os.path.join(ai_dir, sha + ".json"), "w", encoding="utf-8") as f:
                 json.dump(r, f, indent=2, ensure_ascii=False)
 
-    # 6) Aggregate
+    # 7) Aggregate
     aggregated = {
         "rootfs": rootfs,
         "candidates": candidates,
         "static": static_items,
+        "virustotal": vt_results,
         "decomp_map": decomp_map,
         "flagged_for_ai": flagged_for_ai,
         "ai_results": ai_results,
     }
 
-    # 7) Reporting
+    # 8) Reporting
     generate_ai_report(aggregated, out_dir)
     if verbose:
         print("[pipeline] Report written: report.md and report.json")
