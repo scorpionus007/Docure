@@ -8,6 +8,9 @@ from .utils import (
     UTF16_RE,
     hash_file,
 )
+from .packing import detect_packing, calculate_file_entropy
+from .pe_analysis import analyze_pe_file, get_pe_imports
+from .elf_analysis import analyze_elf_file, get_elf_imports, detect_elf_packing
 
 
 def _try_import_magic():
@@ -123,7 +126,39 @@ def compute_hashes_and_metadata(rootfs: str, rel_path: str) -> Dict:
         is_exec_bit = bool(os.stat(abs_path).st_mode & 0o111)
     except Exception:
         pass
-    return {
+
+    # Calculate entropy and detect packing
+    entropy, section_entropy = calculate_file_entropy(abs_path)
+    packing_info = detect_packing(abs_path)
+
+    # Get PE imports if it's a PE file
+    pe_imports: List[str] = []
+    pe_info: Optional[Dict] = None
+    try:
+        pe_info = analyze_pe_file(abs_path)
+        if pe_info:
+            pe_imports = pe_info.get("imports", [])
+    except Exception:
+        pass
+
+    # Get ELF imports if it's an ELF file
+    elf_imports: List[str] = []
+    elf_info: Optional[Dict] = None
+    try:
+        elf_info = analyze_elf_file(abs_path)
+        if elf_info:
+            elf_imports = elf_info.get("imports", [])
+            # Enhance packing detection with ELF-specific analysis
+            elf_packing = detect_elf_packing(abs_path)
+            if elf_packing.get("is_packed") and not packing_info.get("packer_type"):
+                packing_info["is_packed"] = True
+                packing_info["packer_type"] = elf_packing.get("packer_type")
+                packing_info["confidence"] = elf_packing.get("confidence", "medium")
+                packing_info["indicators"].extend(elf_packing.get("indicators", []))
+    except Exception:
+        pass
+
+    result = {
         "rel_path": rel_path.replace("\\", "/"),
         "abs_path": abs_path,
         "md5": md5,
@@ -133,7 +168,47 @@ def compute_hashes_and_metadata(rootfs: str, rel_path: str) -> Dict:
         "mode": mode,
         "file_type": file_type,
         "is_executable": is_exec_bit,
+        "entropy": round(entropy, 4),
+        "section_entropy": round(section_entropy, 4) if section_entropy else None,
+        "is_packed": packing_info.get("is_packed", False),
+        "packer_type": packing_info.get("packer_type"),
+        "packing_confidence": packing_info.get("confidence", "none"),
+        "packing_indicators": packing_info.get("indicators", []),
     }
+
+    # Add PE-specific information if available
+    if pe_info:
+        result["pe_info"] = {
+            "entry_point": pe_info.get("entry_point"),
+            "machine": pe_info.get("machine"),
+            "compile_time": pe_info.get("compile_time"),
+            "sections_count": len(pe_info.get("sections", [])),
+            "imports_count": len(pe_info.get("imports", [])),
+            "exports_count": len(pe_info.get("exports", [])),
+        }
+        # Add PE imports to result (used by suspicion_score)
+        result["pe_imports"] = pe_imports
+
+    # Add ELF-specific information if available
+    if elf_info:
+        result["elf_info"] = {
+            "format": elf_info.get("format"),
+            "architecture": elf_info.get("architecture"),
+            "entry_point": elf_info.get("entry_point"),
+            "sections_count": len(elf_info.get("sections", [])),
+            "segments_count": len(elf_info.get("segments", [])),
+            "imports_count": len(elf_info.get("imports", [])),
+            "exports_count": len(elf_info.get("exports", [])),
+            "symbols_count": len(elf_info.get("symbols", [])),
+        }
+        # Add ELF imports to result (used by suspicion_score)
+        result["elf_imports"] = elf_imports
+
+    # Use ELF imports if PE imports not available
+    if not pe_imports and elf_imports:
+        result["pe_imports"] = elf_imports  # Reuse field name for compatibility
+
+    return result
 
 
 def identify_candidates(manifest: Dict, rootfs: str, max_files: int = 200, max_size_mb: int = 50) -> List[str]:
@@ -184,6 +259,14 @@ def collect_iocs(strings: List[str]) -> Dict[str, List[str]]:
 def suspicion_score(static_meta: Dict, top_strings: List[str], imports: Optional[List[str]] = None) -> Tuple[int, List[str]]:
     score = 0
     reasons: List[str] = []
+
+    # Use PE/ELF imports if available, otherwise use provided imports
+    if not imports:
+        if static_meta.get("pe_imports"):
+            imports = static_meta.get("pe_imports")
+        elif static_meta.get("elf_imports"):
+            imports = static_meta.get("elf_imports")
+
     # Imports
     if imports:
         for name in imports:
@@ -192,11 +275,29 @@ def suspicion_score(static_meta: Dict, top_strings: List[str], imports: Optional
                     score += 4
                     reasons.append(f"suspicious import: {name}")
                     break
+
+    # Packing detection - high suspicion indicator
+    if static_meta.get("is_packed"):
+        score += 5
+        packer_type = static_meta.get("packer_type", "unknown")
+        confidence = static_meta.get("packing_confidence", "none")
+        reasons.append(f"packed file detected (packer: {packer_type}, confidence: {confidence})")
+
+    # High entropy (even if not explicitly packed)
+    entropy = static_meta.get("entropy", 0.0)
+    if entropy >= 7.5:
+        score += 3
+        reasons.append(f"very high entropy ({entropy:.2f}) - possible encryption/packing")
+    elif entropy >= 7.0:
+        score += 2
+        reasons.append(f"high entropy ({entropy:.2f}) - possible compression/packing")
+
     # Strings-based IOCs
     iocs = collect_iocs(top_strings)
     if any(iocs.values()):
         score += 3
         reasons.append("ioc-like strings present")
+
     # Executable marker
     if is_probably_executable(static_meta.get("abs_path", ""), static_meta.get("file_type", ""), bool(static_meta.get("is_executable"))):
         score += 1

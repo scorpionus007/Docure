@@ -14,6 +14,7 @@ from .decomp import decompile_with_ghidra
 from .ai import analyze_with_deepseek
 from .report import generate_ai_report
 from .virustotal import query_virustotal_for_items
+from .unpacking import unpack_file, is_upx_available
 
 
 def _load_manifest(manifest_path: str) -> Dict:
@@ -66,7 +67,11 @@ def analyze_image(
 
     # 2) Static metadata per candidate
     static_dir = os.path.join(out_dir, "static")
+    unpack_dir = os.path.join(out_dir, "unpacked")
+    os.makedirs(unpack_dir, exist_ok=True)
     static_items: List[Dict] = []
+    unpacked_files: Dict[str, str] = {}  # Map original path to unpacked path
+
     for rel in candidates:
         meta = compute_hashes_and_metadata(rootfs, rel)
         strings = extract_strings(meta["abs_path"])[:200]
@@ -79,12 +84,54 @@ def analyze_image(
         write_static_artifact(os.path.join(static_dir, meta["sha256"] + ".json"), item)
         static_items.append(item)
 
+        # 2.5) Attempt unpacking if file is packed
+        if meta.get("is_packed") and meta.get("packer_type"):
+            packer_type = meta.get("packer_type")
+            if verbose:
+                print(f"[pipeline] Attempting to unpack {rel} (packer: {packer_type})")
+
+            unpack_result = unpack_file(
+                meta["abs_path"],
+                packer_type=packer_type,
+                output_dir=unpack_dir
+            )
+
+            if unpack_result.get("success") and unpack_result.get("unpacked_path"):
+                unpacked_path = unpack_result["unpacked_path"]
+                unpacked_files[meta["abs_path"]] = unpacked_path
+                item["unpacked"] = {
+                    "success": True,
+                    "unpacked_path": unpacked_path,
+                    "packer_type": packer_type,
+                }
+                if verbose:
+                    print(f"[pipeline] Successfully unpacked to: {unpacked_path}")
+            else:
+                item["unpacked"] = {
+                    "success": False,
+                    "error": unpack_result.get("error"),
+                    "packer_type": packer_type,
+                }
+                if verbose:
+                    print(f"[pipeline] Unpacking failed: {unpack_result.get('error')}")
+
     # 3) VirusTotal by hash (optional via VT_API_KEY)
     vt_results = query_virustotal_for_items(static_items, out_dir)
 
-    # 4) Ghidra decomp
+    # 4) Ghidra decomp (use unpacked files if available)
     decomp_dir = os.path.join(out_dir, "decomp")
-    abs_files = [it["abs_path"] for it in static_items]
+    abs_files = []
+    for it in static_items:
+        # Prefer unpacked version if available
+        if it.get("unpacked", {}).get("success"):
+            unpacked_path = it["unpacked"]["unpacked_path"]
+            if os.path.isfile(unpacked_path):
+                abs_files.append(unpacked_path)
+            else:
+                abs_files.append(it["abs_path"])
+        else:
+            abs_files.append(it["abs_path"])
+
     decomp_map = decompile_with_ghidra(abs_files, decomp_dir, ghidra_home=ghidra_home, timeout_s=ghidra_timeout_s, verbose=verbose)
     if verbose:
         print(f"[pipeline] Decomp results: {sum(1 for v in decomp_map.values() if v)} ok / {len(decomp_map)} total")
@@ -94,8 +141,15 @@ def analyze_image(
     # 5) Suspicion scoring integrating imports/strings from decomp
     flagged_for_ai: List[Dict] = []
     for it in static_items:
+        # Use unpacked path for decomp lookup if available
         abs_path = it["abs_path"]
-        decomp_json_path = decomp_map.get(abs_path)
+        decomp_lookup_path = abs_path
+        if it.get("unpacked", {}).get("success"):
+            unpacked_path = it["unpacked"]["unpacked_path"]
+            if os.path.isfile(unpacked_path):
+                decomp_lookup_path = unpacked_path
+
+        decomp_json_path = decomp_map.get(decomp_lookup_path) or decomp_map.get(abs_path)
         imports: List[str] = []
         pseudocode_snippets: List[str] = []
         if decomp_json_path and os.path.isfile(decomp_json_path):
@@ -147,6 +201,8 @@ def analyze_image(
         "decomp_map": decomp_map,
         "flagged_for_ai": flagged_for_ai,
         "ai_results": ai_results,
+        "unpacked_files": unpacked_files,
+        "upx_available": is_upx_available(),
     }
 
     # 8) Reporting
