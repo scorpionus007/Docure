@@ -56,7 +56,6 @@
   - After static analysis, detects packed files
   - Attempts to unpack files with detected packers
   - Stores unpacked files in `outputs/unpacked/` directory
-  - Uses unpacked files for Ghidra decompilation (better results)
   - Tracks unpacking success/failure in metadata
 
 ## 📊 New Output Fields
@@ -125,22 +124,20 @@ The packing detection and unpacking are **automatic** - no code changes needed!
 ### Running Analysis
 ```powershell
 # Packing detection happens automatically
-py cli_analyze.py --image alpine:latest --out outputs --verbose
+py cli_analyze.py --file C:\samples\malware.exe --out outputs --verbose
 ```
 
 ### What Happens:
 1. **Static Analysis**: Calculates entropy, detects packing
 2. **Packing Detection**: Identifies UPX and other packers
 3. **Unpacking**: Attempts to unpack detected files
-4. **Re-analysis**: Unpacked files are analyzed with Ghidra
-5. **Reporting**: All results included in final report
+4. **Reporting**: All results included in final report
 
 ### Output Structure
 ```
 outputs/
 ├── static/           # Static analysis (includes packing info)
 ├── unpacked/         # Unpacked files (if any)
-├── decomp/           # Ghidra decompilation (uses unpacked files)
 ├── report.md         # Human-readable report
 └── report.json       # Machine-readable report
 ```

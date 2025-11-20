@@ -1,12 +1,16 @@
 import json
 import os
+import time
 from typing import Dict, List, Optional, Tuple
 
-import requests
+from google import genai
+from google.genai import errors
 
 
-DEEPSEEK_ENDPOINT = "https://api.deepseek.com/v1/chat/completions"
-DEEPSEEK_MODEL = "deepseek-chat"
+# Use stable model
+GEMINI_MODEL = "gemini-pro"
+MAX_RETRIES = 3
+RETRY_DELAY = 2  # seconds
 
 
 def _truncate(text: str, max_chars: int = 6000) -> str:
@@ -58,33 +62,65 @@ Top imports (subset):\n- """ + "\n- ".join(imports[:40]) + "\n\n" + \
     ]
 
 
-def analyze_with_deepseek(items: List[Dict], api_key: Optional[str] = None, endpoint: Optional[str] = None, model: Optional[str] = None) -> List[Dict]:
-    api_key = api_key or os.getenv("DEEPSEEK_API_KEY")
+def analyze_with_gemini(items: List[Dict], api_key: Optional[str] = None, endpoint: Optional[str] = None, model: Optional[str] = None) -> List[Dict]:
+    api_key = api_key or os.getenv("GEMINI_API_KEY")
     if not api_key:
-        raise RuntimeError("DEEPSEEK_API_KEY not set")
-    endpoint = endpoint or DEEPSEEK_ENDPOINT
-    model = model or DEEPSEEK_MODEL
+        raise RuntimeError("GEMINI_API_KEY not set")
+    model = model or GEMINI_MODEL
 
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
+    # Initialize Gemini client
+    client = genai.Client(api_key=api_key)
 
     results: List[Dict] = []
     for item in items:
-        payload = {
-            "model": model,
-            "messages": _build_prompt(item),
-            "temperature": 0.2,
-            "max_tokens": 1200,
-        }
-        resp = requests.post(endpoint, headers=headers, data=json.dumps(payload), timeout=60)
-        if resp.status_code >= 300:
-            results.append({"error": f"HTTP {resp.status_code}", "detail": resp.text, "item": item})
-            continue
-        data = resp.json()
-        content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-        results.append({"item": item, "analysis": content})
+        # Build prompt and combine system/user messages
+        messages = _build_prompt(item)
+        # Combine system and user messages into single contents string
+        combined_text = ""
+        for msg in messages:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            if role == "system":
+                combined_text += f"{content}\n\n"
+            elif role == "user":
+                combined_text += f"{content}\n"
+        
+        # Call Gemini API with retry logic
+        response = None
+        for attempt in range(MAX_RETRIES):
+            try:
+                response = client.models.generate_content(
+                    model=model,
+                    contents=combined_text,
+                )
+                
+                if response and hasattr(response, 'text') and response.text:
+                    content = response.text
+                else:
+                    content = ""
+                
+                results.append({"item": item, "analysis": content})
+                break
+                
+            except errors.ServerError as e:
+                if "overloaded" in str(e).lower() or "503" in str(e):
+                    if attempt < MAX_RETRIES - 1:
+                        wait_time = RETRY_DELAY * (2 ** attempt)  # Exponential backoff
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        results.append({"error": f"Model overloaded after {MAX_RETRIES} attempts", "detail": str(e), "item": item})
+                else:
+                    results.append({"error": str(e), "detail": f"ServerError: {e}", "item": item})
+                    break
+            except Exception as e:
+                results.append({"error": str(e), "detail": f"Exception: {e}", "item": item})
+                break
+    
     return results
+
+# Alias for backward compatibility
+def analyze_with_deepseek(items: List[Dict], api_key: Optional[str] = None, endpoint: Optional[str] = None, model: Optional[str] = None) -> List[Dict]:
+    return analyze_with_gemini(items, api_key, endpoint, model)
 
 

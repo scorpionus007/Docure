@@ -101,8 +101,8 @@ All features are **automatic** - no code changes needed!
 ### Running Analysis
 ```powershell
 # Works with both Windows (PE) and Linux (ELF) binaries
-py cli_analyze.py --image alpine:latest --out outputs --verbose
-py cli_analyze.py --image ubuntu:20.04 --out outputs --verbose
+py cli_analyze.py --file C:\samples\malware.exe --out outputs --verbose
+py cli_analyze.py --file /samples/linux_malware --out outputs --verbose
 ```
 
 ### What Happens:

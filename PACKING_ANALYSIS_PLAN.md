@@ -70,20 +70,14 @@
 - **Implementation**: Dynamic analysis approach (requires sandbox execution)
 - **Dependencies**: Complex, requires execution environment
 
-**C. Ghidra Scripts**
-- **Tool**: Custom Ghidra scripts (you already have Ghidra integration!)
-- **Why**: Can analyze and manually unpack during decompilation
-- **Implementation**: Extend existing `DumpArtifacts.java` script
-- **Dependencies**: Ghidra (already integrated)
-
-**D. OllyDbg/x64dbg (Manual)**
+**C. OllyDbg/x64dbg (Manual)**
 - **Tool**: External debuggers
 - **Why**: Industry standard for manual unpacking
 - **Implementation**: Not automatable, manual process
 - **Dependencies**: External tool
 
 #### **Best Choice for Your Project:**
-**Start with UPX unpacking** - Simple, common, automatable. Add Ghidra-based unpacking later.
+**Start with UPX unpacking** - Simple, common, automatable. Add other packer-specific unpackers later if needed.
 
 ---
 
@@ -136,7 +130,6 @@
 ### Phase 3: Advanced Features (Low Priority)
 8. **Generic unpacking** - Dynamic analysis approach
 9. **DiE integration** - External tool wrapper
-10. **Ghidra unpacking scripts** - Extend existing Ghidra integration
 
 ---
 

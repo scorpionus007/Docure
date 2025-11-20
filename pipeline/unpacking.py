@@ -3,11 +3,14 @@ Unpacking module for malware analysis.
 
 Provides functionality to unpack packed executables.
 """
+import logging
 import os
 import shutil
 import subprocess
 import tempfile
 from typing import Dict, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 
 def find_upx_executable() -> Optional[str]:
@@ -94,10 +97,11 @@ def unpack_upx(packed_file: str, output_file: Optional[str] = None, timeout: int
 def unpack_file(file_path: str, packer_type: Optional[str] = None, output_dir: Optional[str] = None) -> Dict:
     """
     Attempt to unpack a file based on detected packer type.
+    Now supports multiple packers with extended unpacking methods.
     
     Args:
         file_path: Path to the packed file
-        packer_type: Detected packer type (e.g., "UPX")
+        packer_type: Detected packer type (e.g., "UPX", "Armadillo")
         output_dir: Directory to place unpacked file (if None, uses same dir as input)
         
     Returns:
@@ -106,14 +110,30 @@ def unpack_file(file_path: str, packer_type: Optional[str] = None, output_dir: O
             "success": bool,
             "unpacked_path": str | None,
             "packer_type": str | None,
-            "error": str | None
+            "error": str | None,
+            "unpacking_method": str | None,
+            "guidance": str | None,
+            "difficulty": str | None
         }
     """
+    # Import extended unpacking module
+    try:
+        from .unpacking_extended import unpack_file_extended, get_unpacking_guidance
+        # Use extended unpacking for all packers
+        return unpack_file_extended(file_path, packer_type, output_dir)
+    except ImportError:
+        # Fallback to basic UPX-only unpacking
+        logger.warning("[Unpacking] Extended unpacking module not available, using basic UPX-only unpacking")
+    
+    # Basic UPX-only unpacking (fallback)
     result = {
         "success": False,
         "unpacked_path": None,
         "packer_type": packer_type,
-        "error": None
+        "error": None,
+        "unpacking_method": None,
+        "guidance": None,
+        "difficulty": None
     }
     
     if not os.path.isfile(file_path):
@@ -131,15 +151,27 @@ def unpack_file(file_path: str, packer_type: Optional[str] = None, output_dir: O
     output_file = os.path.join(output_dir, base + ".unpacked" + ext)
     
     # Try unpacking based on packer type
-    if packer_type == "UPX" or (packer_type is None and "UPX" in str(packer_type).upper()):
+    if packer_type == "UPX" or (packer_type and "UPX" in packer_type.upper()):
         success, unpacked_path, error = unpack_upx(file_path, output_file)
         result["success"] = success
         result["unpacked_path"] = unpacked_path
         result["error"] = error
+        result["unpacking_method"] = "command_line"
         if success:
             result["packer_type"] = "UPX"
     else:
+        # For non-UPX packers, provide guidance
+        result["unpacking_method"] = "manual"
         result["error"] = f"Unpacking not supported for packer type: {packer_type}"
+        
+        # Try to get guidance if extended module is available
+        try:
+            from .unpacking_extended import get_unpacking_guidance
+            guidance_data = get_unpacking_guidance(packer_type)
+            result["guidance"] = guidance_data.get("guidance", "")
+            result["difficulty"] = guidance_data.get("difficulty", "Unknown")
+        except ImportError:
+            result["guidance"] = f"{packer_type} requires manual unpacking. Install extended unpacking module for detailed guidance."
     
     return result
 

@@ -1,7 +1,9 @@
 import argparse
 import json
+import logging
 import os
 import sys
+from datetime import datetime
 
 # Load .env if present
 try:
@@ -10,58 +12,99 @@ try:
 except Exception:
     pass
 
-from pipeline.orchestrator import analyze_image
-from pipeline.ingestion import ingest
+from pipeline.pipeline_8step import run_8step_pipeline
+
+
+def setup_logging(output_dir: str, verbose: bool = False):
+    """Setup comprehensive logging for the analysis pipeline."""
+    log_dir = os.path.join(output_dir, "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    
+    log_file = os.path.join(log_dir, f"analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
+    
+    # Configure logging
+    log_level = logging.DEBUG if verbose else logging.INFO
+    log_format = "%(asctime)s [%(levelname)s] [%(name)s] %(message)s"
+    date_format = "%Y-%m-%d %H:%M:%S"
+    
+    logging.basicConfig(
+        level=log_level,
+        format=log_format,
+        datefmt=date_format,
+        handlers=[
+            logging.FileHandler(log_file, encoding="utf-8"),
+            logging.StreamHandler(sys.stdout)
+        ]
+    )
+    
+    logger = logging.getLogger(__name__)
+    logger.info(f"Logging initialized. Log file: {log_file}")
+    return logger
 
 
 def main():
-    p = argparse.ArgumentParser(description="Ingest and analyze a Docker image/tar using Ghidra headless and DeepSeek")
-    g = p.add_mutually_exclusive_group(required=True)
-    g.add_argument("--from-manifest", help="Path to ingestion manifest JSON (from cli_ingest.py)")
-    g.add_argument("--image", help="Docker image name, e.g. ubuntu:20.04 or ghcr.io/owner/name:tag")
-    g.add_argument("--tar", help="Path to Docker image tar (docker save/export)")
-    p.add_argument("--out", default="outputs", help="Output directory")
-    p.add_argument("--ghidra-home", help="Path to GHIDRA_HOME (overrides env)")
-    p.add_argument("--no-deepseek", action="store_true", help="Disable DeepSeek AI analysis")
-    p.add_argument("--max-files", type=int, default=200)
-    p.add_argument("--max-size-mb", type=int, default=50)
-    p.add_argument("--ghidra-timeout-s", type=int, default=300)
+    p = argparse.ArgumentParser(
+        description="8-Step Static Malware Analysis Pipeline - Analyzes .exe files with comprehensive static analysis"
+    )
+    p.add_argument("--file", required=True, help="Path to the .exe malware sample to analyze")
+    p.add_argument("--out", default="outputs", help="Output directory for analysis results")
+    p.add_argument("--no-ai-reports", action="store_true", help="Disable AI-generated reports for each step")
     p.add_argument("--verbose", action="store_true", help="Enable verbose debug logging")
-    p.add_argument("--sandbox-base", help="Base directory for sandbox storage (default: SANDBOX_BASE_DIR or repo sandboxes/)")
     args = p.parse_args()
 
+    # Setup logging
+    logger = setup_logging(args.out, args.verbose)
+    
     out_dir = args.out
     os.makedirs(out_dir, exist_ok=True)
 
     try:
-        manifest_path = args.from_manifest
-        if not manifest_path:
-            target = args.image or args.tar
-            if args.verbose:
-                print(f"[cli] Ingesting target: {target}")
-            work_dir, root_dir, manifest_path = ingest(target, base_dir=args.sandbox_base)
-            if args.verbose:
-                print(f"[cli] Sandbox: {work_dir}")
-                print(f"[cli] RootFS:  {root_dir}")
-                print(f"[cli] Manifest: {manifest_path}")
-
-        res = analyze_image(
-            manifest_path=manifest_path,
-            out_dir=out_dir,
-            ghidra_home=args.ghidra_home,
-            use_deepseek=not args.no_deepseek,
-            max_files=args.max_files,
-            max_size_mb=args.max_size_mb,
-            ghidra_timeout_s=args.ghidra_timeout_s,
-            verbose=args.verbose,
+        logger.info("=" * 80)
+        logger.info("Starting 8-Step Static Malware Analysis Pipeline")
+        logger.info("=" * 80)
+        logger.info(f"Input file: {args.file}")
+        logger.info(f"Output directory: {out_dir}")
+        logger.info(f"AI Reports: {not args.no_ai_reports}")
+        
+        if not os.path.isfile(args.file):
+            logger.error(f"File not found: {args.file}")
+            print(f"Error: File not found: {args.file}")
+            return 1
+        
+        # Run the 8-step pipeline
+        results = run_8step_pipeline(
+            file_path=args.file,
+            output_dir=out_dir,
+            use_ai_reports=not args.no_ai_reports
         )
+        
+        # Print summary
+        summary = results.get("summary", {})
+        logger.info("=" * 80)
+        logger.info("Analysis Pipeline Summary")
+        logger.info("=" * 80)
+        logger.info(f"Completed Steps: {summary.get('completed_steps', 0)}/8")
+        logger.info(f"Errors: {summary.get('errors', 0)}")
+        logger.info(f"File Packed: {summary.get('is_packed', False)}")
+        logger.info(f"Results saved to: {out_dir}")
+        logger.info("=" * 80)
+        
+        print("\n" + "=" * 80)
+        print("Analysis Complete!")
+        print("=" * 80)
+        print(f"Completed Steps: {summary.get('completed_steps', 0)}/8")
+        print(f"Results directory: {out_dir}")
+        print(f"  - Step results: {out_dir}/steps/")
+        print(f"  - Step reports: {out_dir}/steps/*_report.md")
+        print(f"  - Complete analysis: {out_dir}/complete_analysis.json")
+        print(f"  - Logs: {out_dir}/logs/")
+        print("=" * 80)
+        
     except Exception as e:
+        logger.error(f"Pipeline execution failed: {e}", exc_info=True)
         print(f"Error: {e}")
         return 1
 
-    with open(os.path.join(out_dir, "analysis_summary.json"), "w", encoding="utf-8") as f:
-        json.dump(res, f, indent=2, ensure_ascii=False)
-    print("Analysis complete. See outputs under:", out_dir)
     return 0
 
 

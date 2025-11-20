@@ -1,6 +1,6 @@
 import json
 import os
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 from .static_analysis import (
     identify_candidates,
@@ -10,7 +10,6 @@ from .static_analysis import (
     suspicion_score,
     write_static_artifact,
 )
-from .decomp import decompile_with_ghidra
 from .ai import analyze_with_deepseek
 from .report import generate_ai_report
 from .virustotal import query_virustotal_for_items
@@ -41,11 +40,9 @@ def _load_manifest(manifest_path: str) -> Dict:
 def analyze_image(
     manifest_path: str,
     out_dir: str,
-    ghidra_home: Optional[str] = None,
     use_deepseek: bool = True,
     max_files: int = 200,
     max_size_mb: int = 50,
-    ghidra_timeout_s: int = 300,
     verbose: bool = False,
 ) -> Dict:
     os.makedirs(out_dir, exist_ok=True)
@@ -118,51 +115,15 @@ def analyze_image(
     # 3) VirusTotal by hash (optional via VT_API_KEY)
     vt_results = query_virustotal_for_items(static_items, out_dir)
 
-    # 4) Ghidra decomp (use unpacked files if available)
-    decomp_dir = os.path.join(out_dir, "decomp")
-    abs_files = []
-    for it in static_items:
-        # Prefer unpacked version if available
-        if it.get("unpacked", {}).get("success"):
-            unpacked_path = it["unpacked"]["unpacked_path"]
-            if os.path.isfile(unpacked_path):
-                abs_files.append(unpacked_path)
-            else:
-                abs_files.append(it["abs_path"])
-        else:
-            abs_files.append(it["abs_path"])
-
-    decomp_map = decompile_with_ghidra(abs_files, decomp_dir, ghidra_home=ghidra_home, timeout_s=ghidra_timeout_s, verbose=verbose)
-    if verbose:
-        print(f"[pipeline] Decomp results: {sum(1 for v in decomp_map.values() if v)} ok / {len(decomp_map)} total")
-        with open(os.path.join(debug_dir, "decomp_map.json"), "w", encoding="utf-8") as f:
-            json.dump(decomp_map, f, indent=2, ensure_ascii=False)
-
-    # 5) Suspicion scoring integrating imports/strings from decomp
+    # 4) Suspicion scoring integrating imports/strings
     flagged_for_ai: List[Dict] = []
     for it in static_items:
-        # Use unpacked path for decomp lookup if available
-        abs_path = it["abs_path"]
-        decomp_lookup_path = abs_path
-        if it.get("unpacked", {}).get("success"):
-            unpacked_path = it["unpacked"]["unpacked_path"]
-            if os.path.isfile(unpacked_path):
-                decomp_lookup_path = unpacked_path
-
-        decomp_json_path = decomp_map.get(decomp_lookup_path) or decomp_map.get(abs_path)
         imports: List[str] = []
+        if it.get("pe_imports"):
+            imports = [str(x) for x in it.get("pe_imports", [])][:100]
+        elif it.get("elf_imports"):
+            imports = [str(x) for x in it.get("elf_imports", [])][:100]
         pseudocode_snippets: List[str] = []
-        if decomp_json_path and os.path.isfile(decomp_json_path):
-            try:
-                with open(decomp_json_path, "r", encoding="utf-8") as f:
-                    dec = json.load(f)
-                imports = [str(x) for x in dec.get("imports", [])][:100]
-                for fobj in dec.get("functions", [])[:5]:
-                    code = fobj.get("pseudocode")
-                    if code:
-                        pseudocode_snippets.append(code)
-            except Exception:
-                pass
         score, reasons = suspicion_score(it, it.get("strings", []), imports)
         it["imports"] = imports
         it["pseudocode"] = pseudocode_snippets
@@ -192,13 +153,12 @@ def analyze_image(
             with open(os.path.join(ai_dir, sha + ".json"), "w", encoding="utf-8") as f:
                 json.dump(r, f, indent=2, ensure_ascii=False)
 
-    # 7) Aggregate
+    # 5) Aggregate
     aggregated = {
         "rootfs": rootfs,
         "candidates": candidates,
         "static": static_items,
         "virustotal": vt_results,
-        "decomp_map": decomp_map,
         "flagged_for_ai": flagged_for_ai,
         "ai_results": ai_results,
         "unpacked_files": unpacked_files,

@@ -1,4 +1,3 @@
-docker
 requests
 # Use python-magic-bin on Windows, python-magic elsewhere
 python-magic-bin; platform_system == "Windows"
@@ -7,4 +6,7 @@ yara-python
 pefile
 lief>=0.13.0
 python-dotenv
+google-genai
+# Optional: Unipacker for multi-packer unpacking support (UPX, ASPack, FSG, MEW, MPRESS, PEtite, YZPack)
+# unipacker
 
