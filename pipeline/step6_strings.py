@@ -1,6 +1,6 @@
 """
 Step 6: String Extraction & AI Analysis
-Extracts strings using strings64 and analyzes with Google Gemini API for malicious patterns.
+Extracts strings using strings64 and analyzes with Anthropic Claude API for malicious patterns.
 """
 import logging
 import os
@@ -9,13 +9,32 @@ import subprocess
 import time
 from typing import Dict, List, Optional
 
-from google import genai
-from google.genai import errors
+# Load .env file if present
+try:
+    from dotenv import load_dotenv  # type: ignore
+    import pathlib
+    # Try to find .env file in project root (parent of pipeline directory)
+    env_path = pathlib.Path(__file__).parent.parent / ".env"
+    if env_path.exists():
+        load_dotenv(dotenv_path=env_path)
+    else:
+        # Fallback to default location (current working directory)
+        load_dotenv()
+except Exception:
+    pass
+
+from anthropic import Anthropic
+try:
+    from anthropic import APIError
+except ImportError:
+    # Fallback if APIError doesn't exist
+    APIError = Exception
 
 logger = logging.getLogger(__name__)
 
-# Use stable model
-GEMINI_MODEL = "gemini-pro"
+# Use Claude model - try haiku first (most widely available), fallback to others if needed
+# Available models: "claude-3-haiku-20240307", "claude-3-sonnet-20240229", "claude-3-opus-20240229"
+CLAUDE_MODEL = "claude-3-haiku-20240307"
 MAX_RETRIES = 3
 RETRY_DELAY = 2  # seconds
 
@@ -173,10 +192,10 @@ def analyze_strings_with_ai(strings: List[str], file_path: str) -> Dict:
     }
     
     try:
-        api_key = os.getenv("GEMINI_API_KEY")
+        api_key = os.getenv("ANTHROPIC_API_KEY")
         if not api_key:
-            result["error"] = "GEMINI_API_KEY not set in environment"
-            logger.error("[Step 6] GEMINI_API_KEY not set")
+            result["error"] = "ANTHROPIC_API_KEY not set in environment"
+            logger.error("[Step 6] ANTHROPIC_API_KEY not set")
             return result
         
         # Limit strings for API call (take most interesting ones)
@@ -197,38 +216,48 @@ def analyze_strings_with_ai(strings: List[str], file_path: str) -> Dict:
         
         strings_text = "\n".join(analysis_strings[:200])  # Limit to 200 for API
         
-        # Initialize Gemini client
-        client = genai.Client(api_key=api_key)
+        # Initialize Anthropic Claude client
+        client = Anthropic(api_key=api_key)
         
-        # Build combined prompt (all content in single string)
-        contents = f"""You are a malware analyst expert. Analyze extracted strings from a potentially malicious file. Identify malicious patterns, suspicious code snippets, IOCs (URLs, IPs, domains), and provide a risk assessment.
-
-Analyze the following extracted strings from file: {os.path.basename(file_path)}
+        # Build system and user messages
+        system_message = "You are a malware analyst expert. Analyze extracted strings from a potentially malicious file. Identify malicious patterns, suspicious code snippets, IOCs (URLs, IPs, domains), and provide a detailed risk assessment. Explain WHY and HOW each pattern is suspicious."
+        
+        user_message = f"""Analyze the following extracted strings from file: {os.path.basename(file_path)}
 
 Extracted Strings ({len(analysis_strings)} total, showing first 200):
 {strings_text}
 
 Please provide:
-1. List of malicious patterns detected
-2. Suspicious strings that indicate malicious behavior
+1. List of malicious patterns detected (explain WHY each is suspicious)
+2. Suspicious strings that indicate malicious behavior (explain HOW they work)
 3. IOCs (URLs, IP addresses, domains)
-4. Risk assessment
+4. Risk assessment with detailed reasoning
 5. Recommended actions
 
-Respond in JSON format with fields: malicious_patterns (array), suspicious_strings (array), iocs (object with urls, ips, domains), risk_level, analysis, recommendations.
+Respond in JSON format with fields: malicious_patterns (array), suspicious_strings (array), iocs (object with urls, ips, domains), risk_level, analysis (detailed explanation), recommendations.
 """
         
-        # Call Gemini API with retry logic
+        # Call Claude API with retry logic
         response = None
         for attempt in range(MAX_RETRIES):
             try:
-                response = client.models.generate_content(
-                    model=GEMINI_MODEL,
-                    contents=contents,
+                response = client.messages.create(
+                    model=CLAUDE_MODEL,
+                    max_tokens=4096,
+                    system=system_message,
+                    messages=[{"role": "user", "content": user_message}],
                 )
                 
-                if response and hasattr(response, 'text') and response.text:
-                    content = response.text
+                if response and hasattr(response, 'content') and response.content:
+                    # Extract text from response content (list of content blocks)
+                    content_blocks = response.content
+                    content = ""
+                    for block in content_blocks:
+                        if hasattr(block, 'text'):
+                            content += block.text
+                        elif isinstance(block, dict) and block.get('type') == 'text':
+                            content += block.get('text', '')
+                    
                     result["analysis"] = content
                     
                     # Try to extract JSON from response
@@ -247,12 +276,13 @@ Respond in JSON format with fields: malicious_patterns (array), suspicious_strin
                     logger.info(f"[Step 6] AI analysis completed: found {len(result['malicious_patterns'])} malicious patterns")
                     break
                 else:
-                    result["error"] = "No response content from Gemini API"
-                    logger.error(f"[Step 6] Gemini API returned no content")
+                    result["error"] = "No response content from Claude API"
+                    logger.error(f"[Step 6] Claude API returned no content")
                     break
                     
-            except errors.ServerError as e:
-                if "overloaded" in str(e).lower() or "503" in str(e):
+            except APIError as e:
+                status_code = getattr(e, 'status_code', None)
+                if status_code == 503 or "overloaded" in str(e).lower():
                     if attempt < MAX_RETRIES - 1:
                         wait_time = RETRY_DELAY * (2 ** attempt)  # Exponential backoff
                         logger.warning(f"[Step 6] Model overloaded (attempt {attempt + 1}/{MAX_RETRIES}), retrying in {wait_time}s...")
@@ -263,7 +293,7 @@ Respond in JSON format with fields: malicious_patterns (array), suspicious_strin
                         logger.error(f"[Step 6] Model overloaded after {MAX_RETRIES} attempts")
                 else:
                     result["error"] = str(e)
-                    logger.error(f"[Step 6] Gemini API error: {e}")
+                    logger.error(f"[Step 6] Claude API error: {e}")
                     break
             except Exception as e:
                 result["error"] = str(e)

@@ -15,6 +15,7 @@ from .step5_imports import analyze_imports_exports
 from .step6_strings import analyze_strings
 from .step7_signature import check_signature_virustotal
 from .step8_metadata import extract_metadata
+from .ai_report import generate_step_report, generate_summary_report
 from .ai_report import generate_step_report
 
 logger = logging.getLogger(__name__)
@@ -289,6 +290,30 @@ def run_8step_pipeline(
     # Save complete results
     with open(os.path.join(output_dir, "complete_analysis.json"), "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2, ensure_ascii=False)
+    
+    # Generate comprehensive summary report
+    if use_ai_reports:
+        logger.info("=" * 80)
+        logger.info("[Pipeline] Generating comprehensive summary report...")
+        logger.info("=" * 80)
+        try:
+            summary_report = generate_summary_report(results)
+            summary_content = summary_report.get("summary_report") or summary_report.get("error") or "Summary report generation failed"
+            
+            # Save summary report
+            summary_path = os.path.join(output_dir, "analysis_summary.md")
+            with open(summary_path, "w", encoding="utf-8") as f:
+                f.write(f"# Comprehensive Malware Analysis Summary Report\n\n")
+                f.write(f"**File:** {results.get('file_name', 'unknown')}\n\n")
+                f.write(f"**Analysis Date:** {results.get('summary', {}).get('completed_steps', 0)}/8 steps completed\n\n")
+                f.write("---\n\n")
+                f.write(summary_content)
+            
+            logger.info(f"[Pipeline] Summary report saved to: {summary_path}")
+            results["summary_report_path"] = summary_path
+        except Exception as e:
+            logger.error(f"[Pipeline] Error generating summary report: {e}", exc_info=True)
+            results["summary_report_error"] = str(e)
     
     logger.info("=" * 80)
     logger.info(f"[Pipeline] Analysis pipeline completed: {results['summary']['completed_steps']}/8 steps")
